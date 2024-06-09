@@ -5,6 +5,7 @@
 #include <WiFi.h>
 
 //  https://github.com/knolleary/pubsubclient
+//  git checkout v2.8
 #include <PubSubClient.h>
 
 #if defined(ESP8266) || defined(ESP32)
