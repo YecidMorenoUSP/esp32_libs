@@ -27,7 +27,11 @@ void setup() {
 
   ESP_LOGI("INIT", "\n\n");
 
-  SD_SPI_init();
+  SD_init_Mutex();
+  SD_SPI_init(14,2,15,13);
+
+  //esp32484840s0
+  // SD_SPI_init(48,41,47,42);
   
   if (SD_init()) {
     ESP_LOGI(SD_TAG, "OK");

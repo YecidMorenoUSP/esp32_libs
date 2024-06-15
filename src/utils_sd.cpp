@@ -1,68 +1,120 @@
 #include "utils_sd.h"
+#include <freertos/semphr.h>
+
+#define TIME_TO_ACCESS_SD 5000/portTICK_PERIOD_MS
+
+SemaphoreHandle_t SD_Mutex;
 
 const char *SD_TAG = "SD";
 const char *SD_FILE_CONFIG = "/config.json";
 
 volatile bool SD_STATE;
 
-SPIClass *SD_spi = NULL;
-void SD_SPI_init() {
-  SD_spi = new SPIClass();
-  SD_spi->begin(48, 41, 47, 42);
-}
+int8_t SD_sck=48;
+int8_t SD_miso=41;
+int8_t SD_mosi=47;
+int8_t SD_ss=42;
 
+bool SD_init_Mutex(){
+  if (SD_Mutex != NULL) return true;
 
-bool SD_init() {
-  // SD_spi->begin(48, 41, 47, 42);
-  if (!SD.begin(42, *SD_spi)) {
-    // SD_spi->end();
-    SD_STATE = false;
-    return false;
+  SD_Mutex = xSemaphoreCreateMutex();
+  if (SD_Mutex == NULL) {
+      ESP_LOGI(SD_TAG,"Failed to create the mutex.\n");
+      return false;
   }
-
-  uint8_t cardType = SD.cardType();
-  if (cardType == CARD_NONE || cardType == CARD_UNKNOWN) {
-    ESP_LOGI(SD_TAG, "No SD card attached or unknown");
-    SD_STATE = false;
-    return false;
-  }
-
-  delay(500);
-
-  if (!SD.exists(SD_FILE_CONFIG))
-        SD_writeFile(SD, SD_FILE_CONFIG, "{}");
-
-  SD_STATE = true;
   return true;
 }
 
-bool SD_INSERTED() {
-  if (!SD_STATE) return false;
+SPIClass *SD_spi = NULL;
+void SD_SPI_init(int8_t _sck,int8_t _miso,int8_t _mosi,int8_t _ss) {
+  SD_sck = _sck;
+  SD_miso = _miso;
+  SD_mosi = _mosi;
+  SD_ss = _ss;
 
-  for (int i = 0; i < 2; i++) {
-    if (SD.exists(SD_FILE_CONFIG)) return true;
+  SD_spi = new SPIClass();
+  SD_spi->begin(_sck,_miso,_mosi,_ss);
+
+  
+}
+
+bool SD_takeMutex(){
+  return xSemaphoreTake(SD_Mutex, portMAX_DELAY) == pdTRUE;
+}
+
+void SD_releaseMutex(){
+    xSemaphoreGive(SD_Mutex);
+}
+
+bool SD_init() {
+  // SD_spi->begin(48, 41, 47, 42);
+  if (xSemaphoreTake(SD_Mutex, portMAX_DELAY) == pdTRUE){
+    if (!SD.begin(SD_ss, *SD_spi)) {
+      // SD_spi->end();
+      SD_STATE = false;
+      xSemaphoreGive(SD_Mutex);
+      return false;
+    }
+
+    uint8_t cardType = SD.cardType();
+    if (cardType == CARD_NONE || cardType == CARD_UNKNOWN) {
+      ESP_LOGI(SD_TAG, "No SD card attached or unknown");
+      SD_STATE = false;
+      xSemaphoreGive(SD_Mutex);
+      return false;
+    }
+
+    delay(500);
+
+    if (!SD.exists(SD_FILE_CONFIG))
+          SD_writeFile(SD, SD_FILE_CONFIG, "{}");
+
+    xSemaphoreGive(SD_Mutex);
+
+    SD_STATE = true;
+    return true;
+
+  }else{
+    return false;
   }
-  SD_init();
-  for (int i = 0; i < 2; i++) {
-    if (SD.exists(SD_FILE_CONFIG)) return true;
+}
+
+bool SD_INSERTED() {
+  if (xSemaphoreTake(SD_Mutex, TIME_TO_ACCESS_SD) == pdTRUE){
+    uint8_t cardType = SD.cardType();
+    if (cardType == CARD_NONE || cardType == CARD_UNKNOWN) {
+      SD_STATE = false;
+      xSemaphoreGive(SD_Mutex);
+      return false;
+    }
+    xSemaphoreGive(SD_Mutex);
+    SD_STATE = true;
+    return true;
+  }else{
+    return false;
   }
-  return false;
 }
 
 
 void SD_get_info(SD_info& __SD_info){
+  if (xSemaphoreTake(SD_Mutex, TIME_TO_ACCESS_SD) == pdTRUE){
   __SD_info.type = SD.cardType();
   __SD_info.size = SD.cardSize();
   __SD_info.size_total = SD.totalBytes();
   __SD_info.size_used = SD.usedBytes();
+    xSemaphoreGive(SD_Mutex);
+  }
 }
 
 void SD_writeFile(fs::FS &fs, const char *path, const char *message) {
   // if (!SD_INSERTED()) return;
+  if (xSemaphoreTake(SD_Mutex, TIME_TO_ACCESS_SD) == pdTRUE){
 
   File file = fs.open(path, FILE_WRITE);
   if (!file) {
     ESP_LOGI(SD_TAG, "Failed to open file for writing");
+    xSemaphoreGive(SD_Mutex);
     return;
   }
   if (file.print(message)) {
@@ -71,6 +123,62 @@ void SD_writeFile(fs::FS &fs, const char *path, const char *message) {
     ESP_LOGI("SD", "Write failed");
   }
   file.close();
+  xSemaphoreGive(SD_Mutex);
+  }
+}
+
+size_t SD_readFileOpennedUntil(File& file,char* buff, size_t initPos, char delimiter){
+  file.seek(initPos,SeekSet);
+
+  size_t newPos = 0;
+  while (file.available()) {
+    buff[newPos] = file.read();
+    if (buff[newPos] == delimiter) {
+        buff[newPos]='\0';
+        return newPos;
+        break;
+    }
+    newPos++;
+  }
+
+  return 0;
+  
+}
+
+bool SD_cropfile(fs::FS &fs, const char *path,size_t initPos){
+  if (xSemaphoreTake(SD_Mutex, TIME_TO_ACCESS_SD) == pdTRUE){
+
+  File file = fs.open(path);
+
+  if (!file) {
+    ESP_LOGI(SD_TAG, "Failed to open file for reading");
+    xSemaphoreGive(SD_Mutex);
+    return false;
+  }
+
+  File tempFile = SD.open("/tempFile.txt", FILE_WRITE);
+  if (!tempFile) {
+      file.close();
+      xSemaphoreGive(SD_Mutex);
+      return false;
+  }
+
+  file.seek(initPos,SeekSet);
+  while (file.available()) {
+      tempFile.write(file.read());
+  }
+
+  file.close();
+  tempFile.close();
+
+  fs.remove(path);
+  fs.rename("/tempFile.txt", path);
+  xSemaphoreGive(SD_Mutex);
+  return true;
+
+  }else{
+    return false;
+  }
 }
 
 void SD_readFile(fs::FS &fs, const char *path) {
@@ -91,20 +199,26 @@ void SD_readFile(fs::FS &fs, const char *path) {
   file.close();
 }
 
-void SD_appendFile(fs::FS &fs, const char *path, const char *message) {
+void SD_appendFile(fs::FS &fs, const char *path, const char *message,char delimiter) {
   // if (!SD_INSERTED()) return;
+  if (xSemaphoreTake(SD_Mutex, TIME_TO_ACCESS_SD) == pdTRUE){
 
   File file = fs.open(path, FILE_APPEND);
   if (!file) {
     ESP_LOGI("SD", "Failed to open file for appending");
+    xSemaphoreGive(SD_Mutex);
     return;
   }
   if (file.print(message)) {
+    if(delimiter != NULL)
+       file.print(delimiter);
     ESP_LOGI(SD_TAG,"Appended to file: %s\n", path);
   } else {
     ESP_LOGI("SD", "Append failed");
   }
   file.close();
+  xSemaphoreGive(SD_Mutex);
+  }
 }
 
 void SD_renameFile(fs::FS &fs, const char *path1, const char *path2) {
